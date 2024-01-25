@@ -111,6 +111,7 @@ func (d *Dictionary) List() ([]string, map[string]Entry, error) {
 }
 
 func (d *Dictionary) addToDictionary(word string, definition string) error {
+	// Validate word and definition
 	if len(word) < 1 || len(word) > 50 {
 		return fmt.Errorf("word must be between 1 and 50 characters")
 	}

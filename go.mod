@@ -1,4 +1,4 @@
-module goProject
+module estiam
 
 go 1.21
 
