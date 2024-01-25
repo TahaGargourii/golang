@@ -2,11 +2,13 @@ package dictionary
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"sync"
+
+	"github.com/go-redis/redis/v8"
 )
 
 type Entry struct {
@@ -18,8 +20,9 @@ func (e Entry) String() string {
 }
 
 type Dictionary struct {
-	filePath string
-	file     *os.File
+	// filePath string
+	// file     *os.File
+	client   *redis.Client
 	addCh    chan entryOperation
 	removeCh chan entryOperation
 	lock     *sync.Mutex
@@ -31,17 +34,32 @@ type entryOperation struct {
 	resultCh   chan error
 }
 
-func New(filePath string) *Dictionary {
-	d := &Dictionary{
-		filePath: filePath,
+func New(addr string, password string, db int) *Dictionary {
+	client := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+		DB:       db,
+	})
+
+	return &Dictionary{
+		client:   client,
 		addCh:    make(chan entryOperation),
 		removeCh: make(chan entryOperation),
-		lock:     &sync.Mutex{}, 
+		lock:     new(sync.Mutex),
 	}
-
-	go d.start()
-	return d
 }
+
+// func New(filePath string) *Dictionary {
+// 	d := &Dictionary{
+// 		filePath: filePath,
+// 		addCh:    make(chan entryOperation),
+// 		removeCh: make(chan entryOperation),
+// 		lock:     &sync.Mutex{}, // Initialize the lock.
+// 	}
+
+// 	go d.start()
+// 	return d
+// }
 
 func (d *Dictionary) start() {
 	for {
@@ -60,15 +78,15 @@ func (d *Dictionary) start() {
 	}
 }
 
-func (d *Dictionary) Close() error {
-	if d.file != nil {
-		err := d.file.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// func (d *Dictionary) Close() error {
+// 	if d.file != nil {
+// 		err := d.file.Close()
+// 		if err != nil {
+// 			return err
+// 		}
+// 	}
+// 	return nil
+// }
 
 func (d *Dictionary) Add(word string, definition string) error {
 	resultCh := make(chan error)
@@ -89,53 +107,36 @@ func (d *Dictionary) Remove(word string) error {
 }
 
 func (d *Dictionary) Get(word string) (Entry, error) {
-	file, err := os.Open(d.filePath)
-	if err != nil {
+	definition, err := d.client.Get(context.Background(), word).Result()
+	if err == redis.Nil {
+		return Entry{}, fmt.Errorf("word '%s' not found in the dictionary. \n", word)
+	} else if err != nil {
 		return Entry{}, err
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.Split(line, ":")
-		if len(parts) == 2 && strings.TrimSpace(parts[0]) == word {
-			return Entry{Definition: strings.TrimSpace(parts[1])}, nil
-		}
-	}
-
-	return Entry{}, fmt.Errorf("word '%s' not found in the dictionary. \n", word)
+	return Entry{Definition: definition}, nil
 }
 
 func (d *Dictionary) List() ([]string, map[string]Entry, error) {
-	file, err := os.Open(d.filePath)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer file.Close()
-
-	lines, err := readLines(file)
+	keys, err := d.client.Keys(context.Background(), "*").Result()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	entries := make(map[string]Entry)
-	var words []string
-
-	for _, line := range lines {
-		parts := strings.Split(line, ":")
-		if len(parts) == 2 {
-			word := strings.TrimSpace(parts[0])
-			definition := strings.TrimSpace(parts[1])
-			entries[word] = Entry{Definition: definition}
-			words = append(words, word)
+	for _, key := range keys {
+		definition, err := d.client.Get(context.Background(), key).Result()
+		if err != nil {
+			return nil, nil, err
 		}
+		entries[key] = Entry{Definition: definition}
 	}
 
-	return words, entries, nil
+	return keys, entries, nil
 }
 
 func (d *Dictionary) addToDictionary(word string, definition string) error {
+	// Validate word and definition
 	if len(word) < 1 || len(word) > 50 {
 		return fmt.Errorf("word must be between 1 and 50 characters")
 	}
@@ -143,17 +144,7 @@ func (d *Dictionary) addToDictionary(word string, definition string) error {
 		return fmt.Errorf("definition must be between 1 and 200 characters")
 	}
 
-	d.lock.Lock()
-	defer d.lock.Unlock()
-
-	file, err := os.OpenFile(d.filePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	entryStr := fmt.Sprintf("%s: %s\n", word, definition)
-	_, err = file.WriteString(entryStr)
+	err := d.client.Set(context.Background(), word, definition, 0).Err()
 	if err != nil {
 		return err
 	}
@@ -162,36 +153,9 @@ func (d *Dictionary) addToDictionary(word string, definition string) error {
 }
 
 func (d *Dictionary) removeFromDictionary(word string) error {
-	file, err := os.Open(d.filePath)
+	err := d.client.Del(context.Background(), word).Err()
 	if err != nil {
 		return err
-	}
-	defer file.Close()
-
-	lines, err := readLines(file)
-	if err != nil {
-		return err
-	}
-
-	for i, line := range lines {
-		parts := strings.Split(line, ":")
-		if len(parts) == 2 && strings.TrimSpace(parts[0]) == word {
-			lines = append(lines[:i], lines[i+1:]...)
-			break
-		}
-	}
-
-	file, err = os.Create(d.filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	for _, line := range lines {
-		_, err = file.WriteString(line + "\n")
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil
