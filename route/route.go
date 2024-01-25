@@ -1,30 +1,31 @@
 package route
 
 import (
+	"context"
 	"fmt"
-	"goProject/dictionary"
 	"net/http"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 )
 
-func NewRouter(d *dictionary.Dictionary) *mux.Router {
+func NewRouter(rdb *redis.Client, ctx context.Context) *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 
-	router.HandleFunc("/add/{word}/{definition}", HandleAddEntry(d)).Methods("POST")
-	router.HandleFunc("/get/{word}", HandleGetDefinition(d)).Methods("GET")
-	router.HandleFunc("/remove/{word}", HandleRemoveEntry(d)).Methods("DELETE")
+	router.HandleFunc("/add/{word}/{definition}", HandleAddEntry(rdb, ctx)).Methods("POST")
+	router.HandleFunc("/get/{word}", HandleGetDefinition(rdb, ctx)).Methods("GET")
+	router.HandleFunc("/remove/{word}", HandleRemoveEntry(rdb, ctx)).Methods("DELETE")
 
 	return router
 }
 
-func HandleAddEntry(d *dictionary.Dictionary) http.HandlerFunc {
+func HandleAddEntry(rdb *redis.Client, ctx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		word := vars["word"]
 		definition := vars["definition"]
 
-		err := d.Add(word, definition)
+		err := rdb.Set(ctx, word, definition, 0).Err()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -34,28 +35,28 @@ func HandleAddEntry(d *dictionary.Dictionary) http.HandlerFunc {
 	}
 }
 
-func HandleGetDefinition(d *dictionary.Dictionary) http.HandlerFunc {
+func HandleGetDefinition(rdb *redis.Client, ctx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		word := vars["word"]
 
-		entry, err := d.Get(word)
+		definition, err := rdb.Get(ctx, word).Result()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Definition of '%s': %s\n", word, entry.String())
+		fmt.Fprintf(w, "Definition of '%s': %s\n", word, definition)
 	}
 }
 
-func HandleRemoveEntry(d *dictionary.Dictionary) http.HandlerFunc {
+func HandleRemoveEntry(rdb *redis.Client, ctx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		word := vars["word"]
 
-		err := d.Remove(word)
+		err := rdb.Del(ctx, word).Err()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
